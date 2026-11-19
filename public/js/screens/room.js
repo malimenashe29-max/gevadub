@@ -239,7 +239,7 @@ export function roomScreen(app, code) {
       <section class="hero" style="padding-bottom:24px">
         <p class="kicker"><b>שלב אחד לפני</b> · ${info.title}</p>
         <h1 class="display" style="font-size:clamp(34px,5.6vw,58px)">צריך את אותו שיר<br>גם אצלך.</h1>
-        <p class="lede">השיר של החדר הזה הגיע מהגלריה של מישהו, והוא לא עובר דרך השרת. בוחרים את אותו סרטון או קובץ מהגלריה שלך, ואנחנו בודקים שזה אותו שיר.</p>
+        <p class="lede">השיר של החדר הזה הגיע מהגלריה של מישהו, והוא לא נשמר אצלנו בשרת. בוחרים את אותו סרטון או קובץ מהגלריה שלך, ואנחנו בודקים שזה אותו שיר.</p>
       </section>
       <label class="drop panel">
         <input type="file" accept="video/*,audio/*" id="file">

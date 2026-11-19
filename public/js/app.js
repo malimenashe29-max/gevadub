@@ -86,7 +86,7 @@ function home(app) {
           </a>`)}
         <a class="song dashed" href="/new?song=gallery" data-link>
           <span class="t">מהגלריה</span>
-          <span class="d">סרטון מטיקטוק או קובץ שמע שיש לך בטלפון. הוא לא עולה לשום מקום, הכל קורה אצלך.</span>
+          <span class="d">סרטון מטיקטוק או קובץ שמע שיש לך בטלפון. את המילים והתזמון אנחנו מזהים לבד.</span>
           <span class="meta mono">MP4 · MP3 · M4A · עד 3:00</span>
         </a>
       </div>

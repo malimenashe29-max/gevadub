@@ -150,11 +150,99 @@ function takePath(code, memberId, kind) {
   return path.join(TAKES, `${safe(code)}-${safe(memberId)}.${kind === 'video' ? 'video' : 'wav'}`);
 }
 
+// ---------- lyrics recognition ----------
+// The audio is passed straight to Whisper and never written to disk here.
+// Groq (free tier, whisper-large-v3) is preferred; OpenAI works too.
+const STT = process.env.STT_URL
+  ? { url: process.env.STT_URL, key: process.env.STT_KEY || '', model: process.env.STT_MODEL || 'whisper-1' }
+  : process.env.GROQ_API_KEY
+  ? { url: 'https://api.groq.com/openai/v1/audio/transcriptions', key: process.env.GROQ_API_KEY, model: 'whisper-large-v3' }
+  : process.env.OPENAI_API_KEY
+    ? { url: 'https://api.openai.com/v1/audio/transcriptions', key: process.env.OPENAI_API_KEY, model: 'whisper-1' }
+    : null;
+
+// A few calls per person per hour is plenty, and protects the key.
+const sttHits = new Map();
+function sttAllowed(ip) {
+  const now = Date.now(), hour = 3600_000;
+  const list = (sttHits.get(ip) || []).filter(t => now - t < hour);
+  if (list.length >= 15) return false;
+  list.push(now); sttHits.set(ip, list);
+  return true;
+}
+
+// Whisper likes to "hear" these over pure music.
+const HALLUCINATIONS = [/תודה שצפיתם/, /תודה רבה לצפייה/, /כתוביות/, /thanks for watching/i, /subtitles by/i, /amara\.org/i];
+const cleanText = s => String(s || '').replace(/[♪♫🎵🎶]/g, '').replace(/\s+/g, ' ').trim();
+
+// Turn Whisper's segments (and words, when present) into singable lines of a few seconds each.
+function toLines(data) {
+  const words = Array.isArray(data.words) ? data.words.filter(w => cleanText(w.word)) : [];
+  const segs = (Array.isArray(data.segments) ? data.segments : [])
+    .filter(s => cleanText(s.text) && !(s.no_speech_prob > 0.8) && !HALLUCINATIONS.some(r => r.test(s.text)));
+  const lines = [];
+  for (const s of segs) {
+    const inSeg = words.filter(w => w.start >= s.start - 0.05 && w.end <= s.end + 0.05);
+    const dur = s.end - s.start;
+    if (inSeg.length >= 4 && (dur > 6.5 || inSeg.length > 9)) {
+      // break long segments into lines of ~3.5 s, at word boundaries
+      let cur = [];
+      for (const w of inSeg) {
+        cur.push(w);
+        if (cur[cur.length - 1].end - cur[0].start >= 3.5 && cur.length >= 3) { lines.push(cur); cur = []; }
+      }
+      if (cur.length) {
+        if (cur.length < 3 && lines.length) lines[lines.length - 1].push(...cur); else lines.push(cur);
+      }
+      continue;
+    }
+    lines.push({ text: cleanText(s.text), t0: s.start, t1: s.end });
+  }
+  return lines.map(l => Array.isArray(l)
+    ? { text: cleanText(l.map(w => w.word).join(' ')), t0: l[0].start, t1: l[l.length - 1].end }
+    : l)
+    .filter(l => l.text && l.t1 > l.t0)
+    .slice(0, 80)
+    .map(l => ({ text: l.text.slice(0, 120), t0: Math.max(0, +l.t0.toFixed(2)), t1: +l.t1.toFixed(2) }));
+}
+
+async function transcribe(req, res) {
+  if (!STT) return send(res, 503, { error: 'זיהוי מילים עוד לא מחובר בשרת הזה' });
+  const ip = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
+  if (!sttAllowed(ip)) return send(res, 429, { error: 'יותר מדי ניסיונות. נסו שוב עוד מעט.' });
+  const audio = await readBody(req, 24 * 1024 * 1024);
+  if (audio.length < 1000) return send(res, 400, { error: 'הקובץ ריק' });
+
+  const lang = String(req.headers['x-geva-lang'] || '');
+  const call = withWords => {
+    const form = new FormData();
+    form.append('file', new Blob([audio], { type: 'audio/wav' }), 'song.wav');
+    form.append('model', STT.model);
+    form.append('response_format', 'verbose_json');
+    form.append('temperature', '0');
+    form.append('timestamp_granularities[]', 'segment');
+    if (withWords) form.append('timestamp_granularities[]', 'word');
+    if (/^[a-z]{2}$/.test(lang)) form.append('language', lang);
+    return fetch(STT.url, { method: 'POST', headers: { Authorization: `Bearer ${STT.key}` }, body: form });
+  };
+
+  let r = await call(true);
+  if (r.status === 400) r = await call(false); // some providers don't do word timing
+  if (!r.ok) {
+    console.error('stt', r.status, (await r.text()).slice(0, 300));
+    return send(res, 502, { error: 'זיהוי המילים נכשל. אפשר לכתוב אותן ידנית.' });
+  }
+  const data = await r.json();
+  return send(res, 200, { language: data.language || null, lines: toLines(data) });
+}
+
 // ---------- api ----------
 async function api(req, res, url) {
   const parts = url.pathname.split('/').filter(Boolean); // ['api', ...]
 
   if (parts[1] === 'time') return send(res, 200, { now: Date.now() });
+  if (parts[1] === 'transcribe' && req.method === 'POST') return transcribe(req, res);
+  if (parts[1] === 'transcribe' && req.method === 'GET') return send(res, 200, { enabled: !!STT });
 
   if (parts[1] === 'rooms' && parts.length === 2 && req.method === 'POST') {
     const body = await readJson(req);

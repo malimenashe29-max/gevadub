@@ -1,6 +1,6 @@
 import { $, $$, html, mount, toast, api, saveRoom, lastName, setLastName, putSong, fmtTime } from '../util.js';
 import { BUILTIN, builtin } from '../songs.js';
-import { audioCtx } from '../audio.js';
+import { audioCtx, mono, downsample, encodeWav } from '../audio.js';
 import { decodeFile, sideRatio, removeVocals, trimmed, fingerprint, lineRegisters, MAX_SECONDS } from '../gallery.js';
 import { go } from '../app.js';
 
@@ -32,7 +32,7 @@ export function createScreen(app) {
           </button>`)}
         <button class="song dashed" data-song="gallery" aria-pressed="${state.song === 'gallery'}">
           <span class="t">מהגלריה</span>
-          <span class="d">סרטון או שיר מהטלפון. נשאר אצלך, לא עולה לשרת.</span>
+          <span class="d">סרטון או שיר מהטלפון. את המילים אנחנו מזהים לבד.</span>
           <span class="meta mono">MP4 · MP3 · M4A</span>
         </button>
       </div>
@@ -119,7 +119,7 @@ export function createScreen(app) {
 
 // ---------- gallery import: file -> preview -> lyrics -> tap to sync -> review ----------
 function importer(el, onDone) {
-  const st = { audio: null, inst: null, bytes: null, title: '', keepSinger: false, canRemove: true, lyrics: '', lines: [], src: null };
+  const st = { audio: null, inst: null, bytes: null, title: '', keepSinger: false, canRemove: true, lyrics: '', lines: [], src: null, stt: { state: 'idle', lang: 'he', error: '' } };
   const ctx = audioCtx();
   const stopAudio = () => { try { st.src?.stop(); } catch {} st.src = null; };
   const playBuf = (buf, from = 0) => {
@@ -138,7 +138,7 @@ function importer(el, onDone) {
         <span style="font-family:var(--font-display);font-size:24px;color:var(--text)">לבחור סרטון או שיר</span>
         <span class="small">שמרת סרטון מטיקטוק? הוא בגלריה. אנחנו מוציאים ממנו את השיר, ממש כאן במכשיר.</span>
       </label>
-      <p class="notice" style="margin-top:14px">הקובץ לא עולה לשרת. כל מי שבחדר יבחר את אותו קובץ אצלו, ואנחנו נבדוק שזה אותו שיר.</p>
+      <p class="notice" style="margin-top:14px">את המילים מזהים לבד. בשביל זה השמע נשלח פעם אחת לזיהוי, ולא נשמר אצלנו. כל מי שבחדר יבחר את אותו קובץ אצלו, ואנחנו נבדוק שזה אותו שיר.</p>
     `);
     $('#file', el).addEventListener('change', async e => {
       const file = e.target.files[0];
@@ -148,6 +148,8 @@ function importer(el, onDone) {
         const { audio, bytes } = await decodeFile(file);
         st.audio = trimmed(audio); st.bytes = bytes;
         st.title = file.name.replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ').slice(0, 60);
+        st.stt = { state: 'idle', lang: st.stt.lang, error: '' };
+        st.lines = []; st.lyrics = '';
         st.canRemove = sideRatio(audio) > 0.08;
         st.keepSinger = !st.canRemove;
         if (st.canRemove) st.inst = await removeVocals(audio);
@@ -182,13 +184,10 @@ function importer(el, onDone) {
             <span class="hint">ההורדה עובדת הכי טוב כשהזמר באמצע והכלים בצדדים. תקשיבו ותחליטו.</span>
           </div>`
         : html`<p class="notice">הקובץ במונו, אז אי אפשר להוריד ממנו את הזמר. הוא יישאר מתחת לקולות שלכם.</p>`}
-        <div class="field">
-          <label for="lyrics">המילים, שורה בכל שורה</label>
-          <textarea id="lyrics" placeholder="מדביקים או כותבים. כל שורה פה היא שורה שמישהו מקבל.">${st.lyrics}</textarea>
-        </div>
-        <div class="row end"><button class="btn primary" id="next" type="button">לתזמן את השורות</button></div>
+        <div id="ly"></div>
       </div>
     `);
+    lyricsArea();
     drawWave($('#wave', el), st.audio);
     $('#p-orig', el).onclick = () => playBuf(st.audio);
     $('#p-inst', el) && ($('#p-inst', el).onclick = () => playBuf(st.inst));
@@ -197,16 +196,76 @@ function importer(el, onDone) {
       st.keepSinger = b.dataset.keep === '1';
       $$('[data-keep]', el).forEach(x => x.setAttribute('aria-pressed', String(x === b)));
     });
-    $('#next', el).onclick = () => {
-      st.title = $('#title', el).value.trim() || 'שיר מהגלריה';
-      st.lyrics = $('#lyrics', el).value;
-      const rows = st.lyrics.split('\n').map(s => s.trim()).filter(Boolean);
-      if (rows.length < 2) return toast('צריך לפחות שתי שורות');
-      if (rows.length > 80) return toast('יותר מדי שורות. עד 80.');
-      st.lines = rows.map(text => ({ text, t0: 0, t1: 0, chorus: false }));
-      stopAudio();
-      tap();
-    };
+    $('#title', el).oninput = e => { st.title = e.target.value; };
+    if (st.stt.state === 'idle') detect();
+  }
+
+  // ---------- automatic lyrics ----------
+  async function detect() {
+    st.stt = { ...st.stt, state: 'busy', error: '' };
+    lyricsArea();
+    try {
+      // Send the middle of the mix in mono at 16 kHz: that's where the singer is, and it keeps the upload small.
+      const voice = downsample(mono(st.audio), st.audio.sampleRate, 16000);
+      const r = await fetch('/api/transcribe', { method: 'POST', headers: { 'Content-Type': 'audio/wav', 'x-geva-lang': st.stt.lang }, body: encodeWav(voice, 16000) });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.error || 'זיהוי המילים נכשל');
+      if (!data.lines?.length) throw new Error('לא שמענו מילים בשיר. אפשר לכתוב אותן ידנית.');
+      st.lines = guessChorus(data.lines.map(l => ({ ...l, chorus: false })));
+      st.stt = { ...st.stt, state: 'done' };
+    } catch (e) {
+      st.stt = { ...st.stt, state: 'fail', error: e.message };
+    }
+    if (el.isConnected && $('#ly', el)) lyricsArea();
+  }
+
+  function lyricsArea() {
+    const box = $('#ly', el);
+    if (!box) return;
+    const s = st.stt;
+    const langSeg = html`
+      <div class="seg" style="margin-top:4px">
+        <button type="button" data-lang="he" aria-pressed="${s.lang === 'he'}">עברית</button>
+        <button type="button" data-lang="en" aria-pressed="${s.lang === 'en'}">English</button>
+      </div>`;
+    if (s.state === 'busy' || s.state === 'idle') {
+      mount(box, html`<div class="field"><span class="label">המילים</span><p class="muted" style="margin:0"><span class="spin"></span> מקשיב לשיר ומזהה את המילים…</p></div>`);
+      return;
+    }
+    if (s.state === 'done') {
+      mount(box, html`
+        <div class="field">
+          <span class="label">המילים</span>
+          <p style="margin:0">זיהינו ${st.lines.length} שורות, עם תזמון.${st.lines.some(l => l.chorus) ? ' שורות שחוזרות סימנו כפזמון.' : ''}</p>
+          <div class="row" style="justify-content:space-between">${langSeg}<span class="muted small">השיר בשפה אחרת? בוחרים ומזהים שוב.</span></div>
+        </div>
+        <div class="row end"><button class="btn primary" id="next" type="button">לראות את השורות</button></div>`);
+      $('#next', el).onclick = () => { stopAudio(); review(); };
+    } else {
+      mount(box, html`
+        <div class="field">
+          <label for="lyrics">המילים</label>
+          <p class="notice" style="margin:0 0 6px">${s.error}</p>
+          <div class="row">${langSeg}<button class="btn ghost" id="retry" type="button">לנסות לזהות שוב</button></div>
+          <textarea id="lyrics" placeholder="או לכתוב לבד, שורה בכל שורה">${st.lyrics}</textarea>
+        </div>
+        <div class="row end"><button class="btn primary" id="next" type="button">לתזמן את השורות</button></div>`);
+      $('#retry', el).onclick = detect;
+      $('#next', el).onclick = () => {
+        st.lyrics = $('#lyrics', el).value;
+        const rows = st.lyrics.split('\n').map(x => x.trim()).filter(Boolean);
+        if (rows.length < 2) return toast('צריך לפחות שתי שורות');
+        if (rows.length > 80) return toast('יותר מדי שורות. עד 80.');
+        st.lines = rows.map(text => ({ text, t0: 0, t1: 0, chorus: false }));
+        stopAudio();
+        tap();
+      };
+    }
+    $$('[data-lang]', box).forEach(b => b.onclick = () => {
+      if (st.stt.lang === b.dataset.lang && st.stt.state !== 'fail') return;
+      st.stt.lang = b.dataset.lang;
+      detect();
+    });
   }
 
   function tap() {
@@ -273,19 +332,30 @@ function importer(el, onDone) {
           ${st.lines.map((l, k) => html`
             <li>
               <span class="t mono">${fmtTime(l.t0)}.${String(Math.floor((l.t0 % 1) * 10))}</span>
-              <span>${l.text}</span>
-              <span class="row" style="gap:6px">
-                <button class="chip" type="button" data-play="${k}">▶</button>
+              <textarea class="line-text" data-text="${k}" rows="1" maxlength="120" aria-label="שורה ${k + 1}">${l.text}</textarea>
+              <span class="row" style="gap:6px;flex-wrap:nowrap">
+                <button class="chip" type="button" data-play="${k}" aria-label="להשמיע">▶</button>
                 <button class="chip" type="button" data-chorus="${k}" aria-pressed="${l.chorus}">כולם</button>
+                <button class="chip" type="button" data-del="${k}" aria-label="למחוק שורה">✕</button>
               </span>
             </li>`)}
         </ul>
+        <p class="muted small" style="margin:0">טעות במילה? לוחצים עליה ומתקנים.</p>
         <div class="row" style="justify-content:space-between">
-          <button class="btn ghost" type="button" id="again">לתזמן מחדש</button>
+          <button class="btn ghost" type="button" id="again">לתזמן ידנית</button>
           <button class="btn primary" type="button" id="ok">זה טוב</button>
         </div>
       </div>
     `);
+    const fit = t => { t.style.height = 'auto'; t.style.height = `${t.scrollHeight + 2}px`; };
+    $$('[data-text]', el).forEach(t => {
+      fit(t);
+      t.oninput = () => { st.lines[+t.dataset.text].text = t.value.replace(/\n/g, ' '); fit(t); };
+    });
+    $$('[data-del]', el).forEach(b => b.onclick = () => {
+      if (st.lines.length <= 2) return toast('צריך לפחות שתי שורות');
+      st.lines.splice(+b.dataset.del, 1); review();
+    });
     $$('[data-chorus]', el).forEach(b => b.onclick = () => {
       const l = st.lines[+b.dataset.chorus]; l.chorus = !l.chorus; b.setAttribute('aria-pressed', String(l.chorus));
     });
@@ -297,6 +367,8 @@ function importer(el, onDone) {
     $('#again', el).onclick = () => { stopAudio(); st.lines = st.lines.map(l => ({ ...l, t0: 0, t1: 0 })); tap(); };
     $('#ok', el).onclick = () => {
       stopAudio();
+      st.lines = st.lines.map(l => ({ ...l, text: l.text.trim() })).filter(l => l.text);
+      if (st.lines.length < 2) return toast('צריך לפחות שתי שורות');
       if (st.lines.every(l => l.chorus)) return toast('לפחות שורה אחת צריכה להיות סולו');
       const regs = lineRegisters(st.audio, st.lines);
       const lines = st.lines.map((l, k) => ({ ...l, spoken: false, register: regs[k] }));
@@ -309,6 +381,15 @@ function importer(el, onDone) {
 
   pick();
   return stopAudio;
+}
+
+// Lines that come back more than once are almost always the chorus.
+function guessChorus(lines) {
+  const norm = s => s.replace(/[^\p{L}\p{N}]+/gu, '').toLowerCase();
+  const count = new Map();
+  lines.forEach(l => { const k = norm(l.text); if (k.length > 3) count.set(k, (count.get(k) || 0) + 1); });
+  const out = lines.map(l => ({ ...l, chorus: (count.get(norm(l.text)) || 0) >= 2 }));
+  return out.every(l => l.chorus) || !out.some(l => !l.chorus) ? lines : out;
 }
 
 function drawWave(canvas, audio) {
