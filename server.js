@@ -172,7 +172,7 @@ function sttAllowed(ip) {
 }
 
 // Whisper likes to "hear" these over pure music.
-const HALLUCINATIONS = [/תודה שצפיתם/, /תודה רבה לצפייה/, /כתוביות/, /thanks for watching/i, /subtitles by/i, /amara\.org/i];
+const HALLUCINATIONS = [/תודה שצפיתם/, /תודה רבה לצפייה/, /כתוביות/, /^\s*(תודה|תודה רבה)[.!]?\s*$/, /^\s*thank you[.!]?\s*$/i, /thanks for watching/i, /subtitles by/i, /amara\.org/i];
 const cleanText = s => String(s || '').replace(/[♪♫🎵🎶]/g, '').replace(/\s+/g, ' ').trim();
 
 // Turn Whisper's segments (and words, when present) into singable lines of a few seconds each.

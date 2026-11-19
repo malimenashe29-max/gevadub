@@ -79,7 +79,7 @@ export function premiereView(app, { code, room, info, onUpdate, onExit }) {
       if (st.dead) return;
     }
     const victimId = current.chaos.victimId;
-    const mix = await buildMix({ info, bed: song.bed, members, parts: current.parts, victimId, onStep: s => { prep.textContent = s; } });
+    const mix = await buildMix({ info, bed: song.bed, bedHasSinger: song.bedHasSinger, members, parts: current.parts, victimId, onStep: s => { prep.textContent = s; } });
     prep.textContent = 'סופר מי ניצח';
     await new Promise(r => setTimeout(r, 20));
     const result = analyze({ info, timeline: mix.timeline, takes: mix.takes, members: current.members, victimId });

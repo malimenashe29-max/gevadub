@@ -1,6 +1,7 @@
 import { $, html, mount, toast, api, upload, fmtTime } from '../util.js';
 import { audioCtx, ctxNow, openMic, encodeWav, downsample, roundTripLatency } from '../audio.js';
 import { songAudio } from '../song-source.js';
+import { singingLevel, bedLevel, matchGain, duckFor } from '../mix.js';
 
 const COUNT_IN = 3;
 const UPLOAD_RATE = 24000;
@@ -9,7 +10,7 @@ const CAMERA_LAG = 0.06;
 export function recordView(app, { code, room, info, onUpdate, onExit }) {
   const me = room.you.id;
   const ctx = audioCtx();
-  const st = { camera: localStorage.getItem('gevadub:cam') !== '0', mic: null, audio: null, take: null, video: null, videoType: '', videoOffset: 0, sources: [], raf: 0, dead: false };
+  const st = { camera: localStorage.getItem('gevadub:cam') !== '0', headphones: localStorage.getItem('gevadub:hp') === '1', mic: null, audio: null, take: null, video: null, videoType: '', videoOffset: 0, sources: [], raf: 0, dead: false };
   let current = room;
 
   onUpdate(r => {
@@ -36,7 +37,7 @@ export function recordView(app, { code, room, info, onUpdate, onExit }) {
       <div class="room-head">
         <div>
           <p class="kicker"><b>הקלטה</b> · ${info.title}</p>
-          <h1 class="display" style="font-size:clamp(34px,5.6vw,58px)">אוזניות על הראש?</h1>
+          <h1 class="display" style="font-size:clamp(34px,5.6vw,58px)">${st.headphones ? 'אוזניות על הראש. יאללה.' : 'יש לך אוזניות?'}</h1>
         </div>
         <button class="btn ghost" id="x">חזרה לחדר</button>
       </div>
@@ -44,8 +45,17 @@ export function recordView(app, { code, room, info, onUpdate, onExit }) {
         <div class="cam" id="cam"><div class="off">${st.camera ? 'מדליק מצלמה…' : 'בלי מצלמה'}</div></div>
         <div class="stack">
           <div class="panel stack">
-            <p style="margin:0">השיר מתנגן לך באוזניות ואתה שר מעליו. ${info.kind === 'upload' ? 'תשמע את הזמר המקורי, כדי שיהיה לך קל לעקוב. בסרטון הסופי הוא לא יהיה.' : 'יש גם מנגינה עדינה שתעזור לך, והיא לא נכנסת לסרטון.'}</p>
-            <p class="muted small" style="margin:0">בלי אוזניות המיקרופון קולט גם את השיר, ואז בסרטון שומעים אותו פעמיים.</p>
+            <p style="margin:0">השיר מתנגן ואתה שר מעליו. ${info.kind === 'upload' ? 'תשמע את הזמר המקורי, כדי שיהיה לך קל לעקוב. בסרטון הסופי הוא לא יהיה.' : 'יש גם מנגינה עדינה שתעזור לך, והיא לא נכנסת לסרטון.'}</p>
+            <div class="field">
+              <span class="label">שומעים את השיר דרך</span>
+              <div class="seg">
+                <button type="button" data-hp="1" aria-pressed="${st.headphones}">אוזניות</button>
+                <button type="button" data-hp="0" aria-pressed="${!st.headphones}">הרמקול של הטלפון</button>
+              </div>
+              <span class="hint">${st.headphones
+                ? 'הכי טוב. הקול שלך נקלט נקי לגמרי.'
+                : 'מנקים מההקלטה את השיר שיוצא מהרמקול. עובד, אבל עם אוזניות זה יוצא הרבה יותר טוב.'}</span>
+            </div>
             <div class="field">
               <span class="label">מצלמה</span>
               <div class="seg">
@@ -65,8 +75,13 @@ export function recordView(app, { code, room, info, onUpdate, onExit }) {
       localStorage.setItem('gevadub:cam', st.camera ? '1' : '0');
       closeMic(); setup();
     });
+    app.querySelectorAll('[data-hp]').forEach(b => b.onclick = () => {
+      st.headphones = b.dataset.hp === '1';
+      localStorage.setItem('gevadub:hp', st.headphones ? '1' : '0');
+      closeMic(); setup();
+    });
 
-    try { st.mic = await openMic({ video: st.camera }); }
+    try { st.mic = await openMic({ video: st.camera, headphones: st.headphones }); }
     catch (e) {
       if (st.camera) { st.camera = false; toast('אין גישה למצלמה. ממשיכים רק עם קול.'); return setup(); }
       $('#cam', app).innerHTML = '<div class="off">אין גישה למיקרופון</div>';
@@ -232,12 +247,17 @@ export function recordView(app, { code, room, info, onUpdate, onExit }) {
     $('#listen', app).onclick = () => {
       stopSources();
       const at = ctx.currentTime + 0.1;
+      // Same balance as the premiere: the song ducked, your voice matched to it.
+      const hasSinger = !!st.audio.bedHasSinger;
+      const ranges = info.lines.filter((l, i) => whoFor(i).mine).map(l => [Math.max(0, l.t0 - 0.25), l.t1 + 0.45]);
+      const gain = matchGain(singingLevel(st.take, UPLOAD_RATE, ranges), bedLevel(st.audio.bed), hasSinger);
       const bed = ctx.createBufferSource(); bed.buffer = st.audio.bed;
-      const bg = ctx.createGain(); bg.gain.value = 0.6; bed.connect(bg).connect(ctx.destination); bed.start(at);
+      const bg = ctx.createGain(); bg.gain.value = duckFor(hasSinger) * 0.9; bed.connect(bg).connect(ctx.destination); bed.start(at);
       const b = new AudioBuffer({ length: st.take.length, numberOfChannels: 1, sampleRate: UPLOAD_RATE });
       b.copyToChannel(st.take, 0);
       const me = ctx.createBufferSource(); me.buffer = b;
-      const mg = ctx.createGain(); mg.gain.value = 1.4; me.connect(mg).connect(ctx.destination); me.start(at);
+      const lim = ctx.createDynamicsCompressor(); lim.threshold.value = -6; lim.ratio.value = 12;
+      const mg = ctx.createGain(); mg.gain.value = gain; me.connect(mg).connect(lim).connect(ctx.destination); me.start(at);
       st.sources.push(bed, me);
       if (vid) { vid.currentTime = Math.max(0, -st.videoOffset); setTimeout(() => vid.play().catch(() => {}), Math.max(0, st.videoOffset) * 1000 + 100); }
       const tick = () => { if (!st.sources.length || st.dead) return; tc.textContent = fmtTime(ctx.currentTime - at); st.raf = requestAnimationFrame(tick); };

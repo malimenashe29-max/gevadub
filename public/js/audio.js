@@ -80,9 +80,11 @@ async function ensureWorklet() {
   return workletReady;
 }
 
-export async function openMic({ video = false } = {}) {
+// Without headphones the mic hears the song from the speaker. The browser's echo canceller
+// knows exactly what the page is playing and takes it back out, so it's on unless you have headphones.
+export async function openMic({ video = false, headphones = false } = {}) {
   const constraints = {
-    audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1 },
+    audio: { echoCancellation: !headphones, noiseSuppression: false, autoGainControl: false, channelCount: 1 },
     video: video ? { facingMode: 'user', width: { ideal: 720 }, height: { ideal: 960 }, frameRate: { ideal: 30 } } : false,
   };
   const stream = await navigator.mediaDevices.getUserMedia(constraints);

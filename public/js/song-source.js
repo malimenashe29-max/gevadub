@@ -22,10 +22,10 @@ export function songInfo(roomSong) {
 export async function songAudio(roomSong, code) {
   if (roomSong.kind === 'builtin') {
     const { backing, guide } = await renderBuiltin(roomSong.id, roomSong.forName);
-    return { listen: backing, guide, bed: backing };
+    return { listen: backing, guide, bed: backing, bedHasSinger: false };
   }
   const imp = await loadImported(code, roomSong.keepSinger);
   if (!imp) return null;
   // While recording you hear the original singer so you can follow; the final video uses the instrumental.
-  return { listen: imp.full, guide: null, bed: imp.instrumental };
+  return { listen: imp.full, guide: null, bed: imp.instrumental, bedHasSinger: imp.keepSinger };
 }
